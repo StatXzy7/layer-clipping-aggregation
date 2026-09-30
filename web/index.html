@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分层裁剪 · 噪声聚合 · 层级缩放 实验台</title>
+<style>
+:root { --bd:#d0d7de; --bg:#f6f8fa; --hi:#ddf4ff; --err:#cf222e; }
+* { box-sizing: border-box; }
+body { font: 13px/1.5 -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 16px; color: #1f2328; }
+h1 { font-size: 17px; margin: 0 0 8px; }
+h2 { font-size: 14px; margin: 16px 0 6px; }
+.panel { border: 1px solid var(--bd); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; background:#fff; }
+label { display: inline-block; margin: 2px 10px 2px 0; }
+input[type=number] { width: 90px; }
+input, select { font: inherit; padding: 2px 4px; border: 1px solid var(--bd); border-radius: 4px; }
+table { border-collapse: collapse; margin: 4px 0; }
+th, td { border: 1px solid var(--bd); padding: 2px 6px; text-align: right; }
+th { background: var(--bg); }
+td.name input { width: 70px; text-align: left; }
+td input.cell { width: 64px; }
+button { font: inherit; padding: 4px 12px; border: 1px solid var(--bd); border-radius: 5px; background: var(--bg); cursor: pointer; }
+button.primary { background: #1f6feb; color: #fff; border-color:#1f6feb; }
+.err { color: var(--err); font-weight: 600; white-space: pre-wrap; }
+.ok { color: #1a7f37; }
+.muted { color: #57606a; }
+.clipped { background: #fff8c5; }
+.layerblock { border: 1px solid var(--bd); border-radius: 6px; padding: 8px 10px; margin: 10px 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+.pill { display:inline-block; background:var(--hi); border-radius: 10px; padding: 0 8px; margin-left: 6px; }
+code { background: var(--bg); padding: 0 3px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>分层裁剪 / 高斯噪声聚合 / 层级缩放 数值实验台</h1>
+<div class="panel">
+  <label>总裁剪预算 B <input type="number" step="any" id="budget" value="4"></label>
+  <label>预算分配
+    <select id="budgetMode">
+      <option value="equal">按层数均分（b=B/√L）</option>
+      <option value="proportional">b² 正比于层维数</option>
+    </select>
+  </label>
+  <label>噪声标准差 σ <input type="number" step="any" id="sigma" value="0.5"></label>
+  <label>种子 <input type="number" step="1" id="seed" value="42"></label>
+  <label>重复次数 <input type="number" step="1" id="repeats" value="50" min="1" max="10000"></label>
+  <label>缩放系数上限 <input type="number" step="any" id="scaleCap" value="10"></label>
+  <label>零范数回退系数 <input type="number" step="any" id="fallbackScale" value="1"></label>
+  <div style="margin-top:8px">
+    <button class="primary" id="run">运行实验</button>
+    <button id="addLayer">增加层</button>
+    <button id="addClient">增加客户端</button>
+    <button id="delClient">删除最后一个客户端</button>
+    <span class="muted">修改任意参数后点“运行”会从当前配置与种子完整重算，不会沿用旧种子的统计。</span>
+  </div>
+  <div id="msg"></div>
+</div>
+<div id="layers"></div>
+<div id="results"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  layers: [
+    { name: "fc1", params: [6, 8], clients: [[3, 4], [-1, -1]] },
+    { name: "fc2", params: [1, 2, 3], clients: [[1, 1, 1], [0, -2, 2]] },
+  ],
+};
+
+function resize1D(a, d) {
+  const out = new Array(d).fill(0);
+  for (let i = 0; i < Math.min(a.length, d); i++) out[i] = a[i];
+  return out;
+}
+
+function renderLayers() {
+  const root = $("layers");
+  root.innerHTML = "";
+  state.layers.forEach((L, li) => {
+    const d = L.params.length;
+    const n = L.clients.length;
+    const div = document.createElement("div");
+    div.className = "layerblock";
+    let html = '<div class="panel" style="margin:0; border:none; padding:0">';
+    html += '<b>层 ' + (li + 1) + '</b> ';
+    html += '名称 <input type="text" data-k="name" style="width:70px" value="' + L.name + '"> ';
+    html += '维数 <input type="number" min="1" step="1" style="width:60px" data-k="dim" value="' + d + '"> ';
+    html += '<button data-k="delLayer">删除该层</button>';
+    html += '<table><thead><tr><th></th>';
+    for (let k = 0; k < d; k++) html += '<th>' + k + '</th>';
+    html += "</tr></thead><tbody>";
+    html += vecRow("参数", "params", L.params);
+    for (let c = 0; c < n; c++) html += vecRow("客户端 " + c, "c" + c, L.clients[c]);
+    html += "</tbody></table></div>";
+    div.innerHTML = html;
+    root.appendChild(div);
+
+    div.querySelector('[data-k="name"]').addEventListener("change", (e) => { L.name = e.target.value; });
+    div.querySelector('[data-k="dim"]').addEventListener("change", (e) => {
+      const nd = Math.max(1, parseInt(e.target.value, 10) || 1);
+      L.params = resize1D(L.params, nd);
+      L.clients = L.clients.map((u) => resize1D(u, nd));
+      renderLayers();
+    });
+    div.querySelector('[data-k="delLayer"]').addEventListener("click", () => {
+      if (state.layers.length > 1) { state.layers.splice(li, 1); renderLayers(); }
+    });
+    div.querySelectorAll("input.cell").forEach((inp) => {
+      inp.addEventListener("change", () => {
+        const parts = inp.name.split(":");
+        const kind = parts[1];
+        const idx = parseInt(parts[2], 10);
+        const k = parseInt(parts[3], 10);
+        const v = parseFloat(inp.value);
+        if (kind === "p") state.layers[li].params[k] = v;
+        else state.layers[li].clients[idx][k] = v;
+      });
+    });
+  });
+}
+
+function vecRow(label, kind, vals) {
+  let html = '<tr><td class="name" style="text-align:left">' + label + "</td>";
+  vals.forEach((v, k) => {
+    const idx = kind.startsWith("c") ? kind.slice(1) : "0";
+    const key = kind.startsWith("c") ? "c:" + idx : "p:0";
+    html += '<td><input class="cell" type="number" step="any" name="x:' + key +
+      ":" + k + '" value="' + v + '"></td>';
+  });
+  return html + "</tr>";
+}
+
+function collectConfig() {
+  return {
+    budget: parseFloat($("budget").value),
+    budgetMode: $("budgetMode").value,
+    sigma: parseFloat($("sigma").value),
+    seed: parseInt($("seed").value, 10),
+    repeats: parseInt($("repeats").value, 10),
+    scaleCap: parseFloat($("scaleCap").value),
+    fallbackScale: parseFloat($("fallbackScale").value),
+    layers: state.layers.map((L) => ({
+      name: L.name,
+      params: L.params.slice(),
+      clients: L.clients.map((u) => u.slice()),
+    })),
+  };
+}
+
+function fmt(v) {
+  if (!Number.isFinite(v)) return String(v);
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1e4 || a < 1e-4) return v.toExponential(4);
+  return String(Math.round(v * 1e8) / 1e8);
+}
+
+function vecToHTML(v) {
+  return "[" + v.map(fmt).join(", ") + "]";
+}
+
+let lastReport = null;
+
+async function run() {
+  const msg = $("msg");
+  msg.className = "muted";
+  msg.textContent = "计算中…";
+  let res, data;
+  try {
+    res = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectConfig()),
+    });
+    data = await res.json();
+  } catch (e) {
+    msg.className = "err";
+    msg.textContent = "请求失败：" + e;
+    return;
+  }
+  if (!res.ok) {
+    msg.className = "err";
+    msg.textContent = "已拒绝该输入，保留上次有效结果：" + (data.error || res.status);
+    return;
+  }
+  lastReport = data;
+  msg.className = "ok";
+  msg.textContent = "完成：" + data.layers.length + " 层，" + data.numClients +
+    " 个客户端，" + data.config.repeats + " 次重复（种子 " + data.config.seed + "）。";
+  renderResults(data);
+}
+
+function renderResults(rep) {
+  const root = $("results");
+  root.innerHTML = "<h2>实验结果</h2>";
+  rep.layers.forEach((L) => {
+    const div = document.createElement("div");
+    div.className = "layerblock";
+    let h = '<b>层 ' + (L.index + 1) + ' · ' + L.name + "</b> ";
+    h += '<span class="muted">维数 ' + L.dim + "，层预算 b=" + fmt(L.budget) +
+      '（b²=' + fmt(L.budget * L.budget) + '），参数范数=' + fmt(L.paramNorm) + "</span>";
+    h += "<table><thead><tr><th>客户端</th><th>裁剪前范数</th><th>裁剪后范数</th>" +
+      "<th>被裁剪</th><th>裁剪比例</th></tr></thead><tbody>";
+    L.clients.forEach((c, i) => {
+      h += '<tr' + (c.clipped ? ' class="clipped"' : "") + "><td>" + i + "</td><td>" +
+        fmt(c.normBefore) + "</td><td>" + fmt(c.normAfter) + "</td><td>" +
+        (c.clipped ? "是" : "否") + "</td><td>" + fmt(c.ratio) + "</td></tr>";
+    });
+    h += "</tbody></table>";
+    h += '<div class="grid2"><div>';
+    h += "<b>无噪声参考</b><br>";
+    h += "聚合范数：" + fmt(L.refAggNorm) + "　缩放比：" + fmt(L.refScale) + "<br>";
+    h += "最终更新：" + vecToHTML(L.refUpdate);
+    h += "<br><b>重复实验统计（最终更新）</b><br>";
+    h += "均值：" + vecToHTML(L.meanUpdate) + "<br>";
+    h += "方差：" + vecToHTML(L.varUpdate) + "<br>";
+    h += "缩放比均值/方差：" + fmt(L.meanScale) + " / " + fmt(L.varScale) + "<br>";
+    h += "对参考的 RMSE：" + fmt(L.rmse) + "　最大绝对误差：" + fmt(L.maxAbsErr);
+    h += "</div><div>";
+    h += "<b>未缩放聚合统计</b><br>";
+    h += "均值：" + vecToHTML(L.meanRaw) + "<br>";
+    h += "方差：" + vecToHTML(L.varRaw);
+    h += "<br><b>各次重复（最多显示前 20 次）</b>";
+    h += "<table><thead><tr><th>#</th><th>聚合范数</th><th>缩放比</th><th>最终更新</th></tr></thead><tbody>";
+    L.reps.slice(0, 20).forEach((r, i) => {
+      h += "<tr><td>" + i + "</td><td>" + fmt(r.aggNorm) + "</td><td>" + fmt(r.scale) +
+        "</td><td>" + vecToHTML(r.update) + "</td></tr>";
+    });
+    h += "</tbody></table>";
+    if (L.reps.length > 20) h += '<div class="muted">其余 ' + (L.reps.length - 20) + " 次已计入统计，不在此展开。</div>";
+    h += "</div></div>";
+    div.innerHTML = h;
+    root.appendChild(div);
+  });
+}
+
+$("run").addEventListener("click", run);
+$("addLayer").addEventListener("click", () => {
+  const d = state.layers[0].params.length;
+  const n = state.layers[0].clients.length;
+  state.layers.push({
+    name: "fc" + (state.layers.length + 1),
+    params: new Array(d).fill(0),
+    clients: Array.from({ length: n }, () => new Array(d).fill(0)),
+  });
+  renderLayers();
+});
+$("addClient").addEventListener("click", () => {
+  state.layers.forEach((L) => L.clients.push(new Array(L.params.length).fill(0)));
+  renderLayers();
+});
+$("delClient").addEventListener("click", () => {
+  if (state.layers[0].clients.length > 1) {
+    state.layers.forEach((L) => L.clients.pop());
+    renderLayers();
+  }
+});
+
+renderLayers();
+(async () => {
+  try {
+    const res = await fetch("/api/last");
+    const data = await res.json();
+    if (data && data.layers) { lastReport = data; renderResults(data); }
+  } catch (e) { /* fresh start */ }
+})();
+</script>
+</body>
+</html>
